@@ -47,11 +47,10 @@ if [ -d "$INSTALL_DIR/.git" ]; then
     git -C "$INSTALL_DIR" pull
 elif [ -d "$INSTALL_DIR" ] && [ "$(ls -A "$INSTALL_DIR")" ]; then
     echo "      Directory exists but is not a git repo — initialising..."
-    cd "$INSTALL_DIR"
-    git init
-    git remote add origin "$REPO_URL"
-    git fetch
-    git checkout -f main
+    git -C "$INSTALL_DIR" init
+    git -C "$INSTALL_DIR" remote add origin "$REPO_URL"
+    git -C "$INSTALL_DIR" fetch
+    git -C "$INSTALL_DIR" checkout -f main
 else
     git clone "$REPO_URL" "$INSTALL_DIR"
 fi
