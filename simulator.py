@@ -6,6 +6,12 @@ Simulates the local HTTP API of the SunEnergyXT 500 Series device,
 including mDNS/Zeroconf announcement so Home Assistant can discover it
 automatically — just like the real device.
 
+Realistic starting state:
+- No PV modules connected
+- No meter configured (MS=0, MD empty)
+- Battery empty (SOC=15%), charging from grid at ~800W
+- GS=0 (no setpoint from HA yet)
+
 Usage:
     python simulator.py [--ip 0.0.0.0] [--port 80] [--sn TBsimulator0001]
 
@@ -13,11 +19,13 @@ Requirements:
     pip install flask zeroconf
 
 Endpoints implemented:
-    GET  /read   → returns current device state
-    POST /write  → accepts partial state updates (GS, IS, SI, SA, etc.)
+    GET  /read       → returns current device state
+    POST /write      → accepts partial state updates (GS, IS, SI, SA, etc.)
 
-The simulator logs all /write calls to the console so you can verify
-that the HA integration is writing GS correctly.
+Simulator-only endpoints (not on real device):
+    GET  /sim/state  → full current state
+    GET  /sim/writes → write history
+    POST /sim/set    → inject arbitrary state changes
 """
 
 import argparse
@@ -38,7 +46,7 @@ logging.basicConfig(
 log = logging.getLogger("simulator")
 
 # ---------------------------------------------------------------------------
-# Default device state — mirrors a real 500 PRO response from /read
+# Default device state — freshly installed 500 PRO, no PV, no meter
 # ---------------------------------------------------------------------------
 DEFAULT_STATE: dict = {
     # Identity
@@ -50,44 +58,45 @@ DEFAULT_STATE: dict = {
     "ST": 2,                  # 2 = Running
     "WT": 3,                  # Wi-Fi connected
 
-    # PV input (simulated ~1500W solar)
-    "PV": 1500,
-    "PV1": 400, "PV2": 400, "PV3": 350, "PV4": 350,
-    "II1": 1.8, "II2": 1.8, "II3": 1.6, "II4": 1.6,
-    "VP1": 222.0, "VP2": 222.0, "VP3": 219.0, "VP4": 219.0,
+    # PV input — no modules connected
+    "PV": 0,
+    "PV1": 0, "PV2": 0, "PV3": 0, "PV4": 0,
+    "II1": 0.0, "II2": 0.0, "II3": 0.0, "II4": 0.0,
+    "VP1": 0.0, "VP2": 0.0, "VP3": 0.0, "VP4": 0.0,
 
-    # Power flow
-    "IW": 1500,               # total input
-    "OP": 1200,               # total output
-    "GP": 0,                  # grid port power (GS setpoint result)
-    "LP": 0,                  # load port power
-    "PB": 300,                # battery power (positive = charging)
+    # Power flow — charging from grid at max charge power
+    "IW": 800,                # total input = grid charging
+    "OP": 0,                  # no output (not discharging)
+    "GP": -800,               # negative = drawing from grid
+    "LP": 0,                  # no load port
+    "PB": 800,                # battery charging at 800W
 
-    # Battery
-    "SC": 62,                 # total SOC %
-    "SC0": 62,                # head unit SOC
+    # Battery — freshly installed, low SOC
+    "SC": 15,                 # total SOC %
+    "SC0": 15,                # head unit SOC
+    "ON": 1,                  # 1 battery pack online
 
-    # GS setpoint (writable)
-    "GS": 0,
-    "IS": 2400,
-    "SI": 10,
-    "SA": 95,
-    "SO": 10,
-    "PT": 1440,
+    # Setpoints (writable)
+    "GS": 0,                  # no setpoint from HA yet
+    "IS": 2400,               # max inverter power
+    "SI": 10,                 # min discharge SOC
+    "SA": 95,                 # max charge SOC
+    "SO": 10,                 # min off-grid discharge SOC
+    "PT": 1440,               # auto-shutdown time
 
     # Modes
     "LM": 1,                  # local mode on
-    "MM": 0,                  # self-consumption mode off
-    "PM": 0,
+    "MM": 0,                  # self-consumption mode off (no meter)
+    "PM": 0,                  # no parallel mode
 
-    # Meter
-    "MS": 0,                  # no meter bound
-    "MD": "",
+    # Meter — not configured
+    "MS": 0,                  # 0 = not bound
+    "MD": "",                 # no meter connection string
 
     # Energy counters (Wh, raw)
-    "PD": 4200,               # today PV
-    "GD1": 0,                 # today grid charge
-    "GD2": 580,               # today grid feed-in
+    "PD": 0,                  # no PV today
+    "GD1": 0,                 # grid charge today (updated by dynamics)
+    "GD2": 0,                 # grid feed-in today
     "LD": 0,
 
     # Network
@@ -123,7 +132,7 @@ write_log: list[dict] = []
 # Flask app
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
-app.logger.setLevel(logging.WARNING)  # silence Flask request logs (we do our own)
+app.logger.setLevel(logging.WARNING)
 
 
 @app.route("/read", methods=["GET"])
@@ -174,27 +183,26 @@ def write():
 
 @app.route("/sim/state", methods=["GET"])
 def sim_state():
-    """Extra endpoint: inspect full simulator state (not part of real device API)."""
+    """Simulator only: inspect full state."""
     with state_lock:
         return jsonify(state)
 
 
 @app.route("/sim/writes", methods=["GET"])
 def sim_writes():
-    """Extra endpoint: inspect all received /write calls."""
+    """Simulator only: inspect all received /write calls."""
     return jsonify(write_log)
 
 
 @app.route("/sim/set", methods=["POST"])
 def sim_set():
     """
-    Extra endpoint: inject arbitrary state changes into the simulator.
-    Useful for simulating changing PV power, SOC, grid flow etc.
+    Simulator only: inject arbitrary state changes.
 
-    Example:
-        curl -X POST http://localhost:8500/sim/set \\
+    Example — simulate 2000W solar arriving:
+        curl -X POST http://device-ip/sim/set \\
              -H 'Content-Type: application/json' \\
-             -d '{"PV": 2000, "SC": 80, "GP": -500}'
+             -d '{"PV": 2000, "GP": 1200}'
     """
     body = request.get_json(silent=True)
     if not body:
@@ -207,10 +215,111 @@ def sim_set():
 
 
 # ---------------------------------------------------------------------------
+# Dynamics simulation loop
+# ---------------------------------------------------------------------------
+def simulate_dynamics():
+    """
+    Realistic simulation of a freshly installed 500 PRO without PV modules:
+
+    - Charges from grid until SA (max charge SOC) is reached
+    - Respects GS setpoint written by HA: negative = charge from grid,
+      positive = discharge to grid, 0 = device decides
+    - No PV input (modules not connected)
+    - Updates GD1 (today's grid charge energy) as it charges
+    - Once SA is reached, stops charging (standby)
+    """
+    CHARGE_POWER_W = 800      # default grid charge power when GS=0
+    SOC_STEP = 0.05           # SOC % per 5s tick at 800W into ~5kWh battery
+    TICK_S = 5
+
+    while True:
+        time.sleep(TICK_S)
+
+        with state_lock:
+            soc = state["SC"]
+            sa = state.get("SA", 95)
+            si = state.get("SI", 10)
+            gs = state.get("GS", 0)
+            pv = state.get("PV", 0)
+
+            # Determine actual charge/discharge behaviour
+            if gs < 0:
+                # HA commanded grid import (charge battery)
+                charge_power = min(abs(gs), 2400)
+                if soc < sa:
+                    new_soc = min(sa, soc + (charge_power / 800) * SOC_STEP)
+                    state["SC"] = round(new_soc, 2)
+                    state["SC0"] = state["SC"]
+                    state["PB"] = charge_power
+                    state["GP"] = -charge_power
+                    state["IW"] = charge_power + pv
+                    state["OP"] = 0
+                    # Accumulate grid charge energy (Wh)
+                    state["GD1"] = round(
+                        state.get("GD1", 0) + (charge_power * TICK_S / 3600), 1
+                    )
+                    log.debug("🔋 Charging at %dW (GS=%d), SOC=%.1f%%",
+                              charge_power, gs, state["SC"])
+                else:
+                    # SA reached, stop charging
+                    state["PB"] = 0
+                    state["GP"] = 0
+                    state["IW"] = pv
+                    state["OP"] = 0
+
+            elif gs > 0:
+                # HA commanded grid export (discharge battery)
+                discharge_power = min(gs, 2400)
+                if soc > si:
+                    new_soc = max(si, soc - (discharge_power / 800) * SOC_STEP)
+                    state["SC"] = round(new_soc, 2)
+                    state["SC0"] = state["SC"]
+                    state["PB"] = -discharge_power
+                    state["GP"] = discharge_power + pv
+                    state["IW"] = pv
+                    state["OP"] = discharge_power
+                    # Accumulate grid feed-in energy (Wh)
+                    state["GD2"] = round(
+                        state.get("GD2", 0) + (discharge_power * TICK_S / 3600), 1
+                    )
+                    log.debug("⚡ Discharging at %dW (GS=%d), SOC=%.1f%%",
+                              discharge_power, gs, state["SC"])
+                else:
+                    # SI reached, stop discharging
+                    state["PB"] = 0
+                    state["GP"] = pv
+                    state["IW"] = pv
+                    state["OP"] = pv
+
+            else:
+                # GS=0 — device decides: charge from grid if SOC < SA
+                if soc < sa:
+                    new_soc = min(sa, soc + SOC_STEP)
+                    state["SC"] = round(new_soc, 2)
+                    state["SC0"] = state["SC"]
+                    state["PB"] = CHARGE_POWER_W
+                    state["GP"] = -(CHARGE_POWER_W - pv)
+                    state["IW"] = CHARGE_POWER_W
+                    state["OP"] = 0
+                    state["GD1"] = round(
+                        state.get("GD1", 0) + (CHARGE_POWER_W * TICK_S / 3600), 1
+                    )
+                    log.debug("🔋 Auto-charging at %dW (GS=0), SOC=%.1f%%",
+                              CHARGE_POWER_W, state["SC"])
+                else:
+                    # Fully charged, standby
+                    state["PB"] = 0
+                    state["GP"] = pv
+                    state["IW"] = pv
+                    state["OP"] = pv
+                    if soc >= sa:
+                        log.debug("✅ Battery full (SOC=%.1f%%), standby", soc)
+
+
+# ---------------------------------------------------------------------------
 # mDNS / Zeroconf announcement
 # ---------------------------------------------------------------------------
 def get_local_ip() -> str:
-    """Best-effort: find the LAN IP of this machine."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -222,14 +331,8 @@ def get_local_ip() -> str:
 
 
 def start_mdns(sn: str, ip: str, port: int) -> Zeroconf:
-    """
-    Announce the simulator via mDNS so HA can discover it automatically.
-    The hostname follows the pattern the integration expects:
-        sunlit-{sn}.local
-    """
     zeroconf = Zeroconf()
     hostname = f"sunlit-{sn}.local."
-
     info = ServiceInfo(
         type_="_http._tcp.local.",
         name=f"SunEnergyXT-{sn}._http._tcp.local.",
@@ -248,60 +351,15 @@ def start_mdns(sn: str, ip: str, port: int) -> Zeroconf:
 
 
 # ---------------------------------------------------------------------------
-# SOC / PV simulation loop (optional background thread)
-# ---------------------------------------------------------------------------
-def simulate_dynamics():
-    """
-    Gently varies PV power and SOC over time so the dashboard looks alive.
-    Runs as a daemon thread — safe to kill when the process exits.
-    """
-    import math
-    t = 0
-    while True:
-        time.sleep(5)
-        t += 5
-        # Simulate a sine-wave solar day (peak at t=43200s = noon)
-        hour_of_day = (t % 86400) / 3600
-        solar_factor = max(0.0, math.sin(math.pi * hour_of_day / 12))
-        pv = int(solar_factor * 2200)
-
-        with state_lock:
-            state["PV"] = pv
-            state["PV1"] = pv // 4
-            state["PV2"] = pv // 4
-            state["PV3"] = pv // 4
-            state["PV4"] = pv - 3 * (pv // 4)
-            state["IW"] = pv
-
-            # Charge battery if PV > GS target
-            gs = state.get("GS", 0)
-            surplus = pv - abs(gs) if gs <= 0 else pv - gs
-            soc = state["SC"]
-            if surplus > 50 and soc < state.get("SA", 95):
-                state["SC"] = min(state.get("SA", 95), soc + 0.1)
-                state["SC0"] = state["SC"]
-                state["PB"] = min(surplus, 2400)
-            elif surplus < -50 and soc > state.get("SI", 10):
-                state["SC"] = max(state.get("SI", 10), soc - 0.1)
-                state["SC0"] = state["SC"]
-                state["PB"] = max(surplus, -2400)
-            else:
-                state["PB"] = 0
-
-            state["SC"] = round(state["SC"], 1)
-            state["SC0"] = state["SC"]
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="SunEnergyXT 500 PRO Simulator")
-    parser.add_argument("--ip", default="0.0.0.0", help="Bind IP (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8500, help="HTTP port (default: 8500 — use 80 to match real device)")
-    parser.add_argument("--sn", default="TBsimulator0001", help="Simulated serial number")
-    parser.add_argument("--no-mdns", action="store_true", help="Disable mDNS announcement")
-    parser.add_argument("--no-dynamics", action="store_true", help="Disable PV/SOC simulation loop")
+    parser.add_argument("--ip", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=80)
+    parser.add_argument("--sn", default="TBsimulator0001")
+    parser.add_argument("--no-mdns", action="store_true")
+    parser.add_argument("--no-dynamics", action="store_true")
     args = parser.parse_args()
 
     lan_ip = get_local_ip()
@@ -316,15 +374,16 @@ def main():
     log.info("SN       : %s", args.sn)
     log.info("LAN IP   : %s", lan_ip)
     log.info("Port     : %d", args.port)
+    log.info("Start    : SOC=15%%, no PV, charging from grid")
     log.info("")
     log.info("Endpoints:")
     log.info("  GET  http://%s:%d/read", lan_ip, args.port)
     log.info("  POST http://%s:%d/write", lan_ip, args.port)
     log.info("")
-    log.info("Simulator extras (not on real device):")
-    log.info("  GET  http://%s:%d/sim/state   → full state", lan_ip, args.port)
-    log.info("  GET  http://%s:%d/sim/writes  → write log", lan_ip, args.port)
-    log.info("  POST http://%s:%d/sim/set     → inject state", lan_ip, args.port)
+    log.info("Simulator extras:")
+    log.info("  GET  http://%s:%d/sim/state", lan_ip, args.port)
+    log.info("  GET  http://%s:%d/sim/writes", lan_ip, args.port)
+    log.info("  POST http://%s:%d/sim/set", lan_ip, args.port)
     log.info("=" * 60)
 
     zeroconf = None
@@ -333,12 +392,11 @@ def main():
             zeroconf = start_mdns(args.sn, lan_ip, args.port)
         except Exception as e:
             log.warning("mDNS failed (non-fatal): %s", e)
-            log.warning("Add the device manually via IP in HA.")
 
     if not args.no_dynamics:
         t = threading.Thread(target=simulate_dynamics, daemon=True)
         t.start()
-        log.info("🌤️  PV/SOC dynamics simulation running")
+        log.info("🔋 Dynamics running — charging from grid, SOC starts at 15%%")
 
     try:
         app.run(host=args.ip, port=args.port, debug=False, use_reloader=False)
