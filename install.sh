@@ -11,7 +11,6 @@ set -e
 
 REPO_URL="https://github.com/ChristophCaina/SunEnergyXT-500-Simulator.git"
 INSTALL_DIR="/opt/sunenergyxt-simulator"
-SIMULATOR_DIR="$INSTALL_DIR"
 SERVICE_NAME="sunenergyxt-simulator"
 PORT=8500
 SN="TBsimulator0001"
@@ -46,6 +45,13 @@ echo "[2/5] Cloning repository..."
 if [ -d "$INSTALL_DIR/.git" ]; then
     echo "      Repo exists — pulling latest..."
     git -C "$INSTALL_DIR" pull
+elif [ -d "$INSTALL_DIR" ] && [ "$(ls -A "$INSTALL_DIR")" ]; then
+    echo "      Directory exists but is not a git repo — initialising..."
+    cd "$INSTALL_DIR"
+    git init
+    git remote add origin "$REPO_URL"
+    git fetch
+    git checkout -f main
 else
     git clone "$REPO_URL" "$INSTALL_DIR"
 fi
@@ -68,8 +74,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=${SIMULATOR_DIR}
-ExecStart=${SIMULATOR_DIR}/venv/bin/python simulator.py --port ${PORT} --sn ${SN} ${EXTRA_ARGS}
+WorkingDirectory=${INSTALL_DIR}
+ExecStart=${INSTALL_DIR}/venv/bin/python simulator.py --port ${PORT} --sn ${SN} ${EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -99,13 +105,13 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     echo ""
     echo " Test:"
     echo "   curl http://$IP:$PORT/read"
+    echo "   curl http://$IP:$PORT/sim/writes"
     echo ""
     echo " Logs:"
     echo "   journalctl -u $SERVICE_NAME -f"
     echo ""
     echo " Update:"
-    echo "   git -C $INSTALL_DIR pull"
-    echo "   systemctl restart $SERVICE_NAME"
+    echo "   git -C $INSTALL_DIR pull && systemctl restart $SERVICE_NAME"
     echo "=================================================="
 else
     echo "❌  Service failed to start. Check logs:"
