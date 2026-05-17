@@ -34,6 +34,8 @@ import logging
 import socket
 import threading
 import time
+import urllib.request
+import urllib.error
 from datetime import datetime, UTC
 
 from flask import Flask, jsonify, request
@@ -215,25 +217,74 @@ def sim_set():
 
 
 # ---------------------------------------------------------------------------
+# Meter polling — reads total_power from HA proxy URL (like the real device)
+# ---------------------------------------------------------------------------
+def _poll_meter_url(url: str) -> float | None:
+    """
+    Poll the HA proxy endpoint and return total_power in Watts.
+    Returns None on any error.
+    Sign convention: positive = export to grid, negative = import from grid.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            data = json.loads(resp.read())
+            return float(data["total_power"])
+    except (urllib.error.URLError, KeyError, ValueError, OSError) as e:
+        log.warning("⚠️  Meter poll failed (%s): %s", url, e)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Dynamics simulation loop
 # ---------------------------------------------------------------------------
 def simulate_dynamics():
     """
-    Realistic simulation of a freshly installed 500 PRO without PV modules:
+    Simulates a SunEnergyXT 500 PRO with two operating modes:
 
-    - Charges from grid until SA (max charge SOC) is reached
-    - Respects GS setpoint written by HA: negative = charge from grid,
-      positive = discharge to grid, 0 = device decides
-    - No PV input (modules not connected)
-    - Updates GD1 (today's grid charge energy) as it charges
-    - Once SA is reached, stops charging (standby)
+    MM=1 + MD set (self-consumption mode):
+        Polls the HA proxy URL configured in MD, reads total_power and
+        uses it as the regulation target — exactly like the real device.
+        Positive total_power = grid export → battery charges to absorb surplus.
+        Negative total_power = grid import → battery discharges to cover demand.
+
+    MM=0 or MD empty (manual / GS mode):
+        Falls back to GS setpoint behaviour:
+        GS < 0 → charge from grid, GS > 0 → discharge to grid, GS = 0 → auto.
     """
     CHARGE_POWER_W = 800      # default grid charge power when GS=0
+    MAX_POWER_W = 2400        # max inverter power
     SOC_STEP = 0.05           # SOC % per 5s tick at 800W into ~5kWh battery
     TICK_S = 5
+    METER_POLL_S = 1          # poll meter every 1s (like real device)
+
+    last_meter_poll = 0.0
+    last_total_power: float | None = None
 
     while True:
         time.sleep(TICK_S)
+        now = time.monotonic()
+
+        # --- Meter polling (MM=1 mode) ---
+        with state_lock:
+            mm = state.get("MM", 0)
+            md = state.get("MD", "")
+
+        meter_url = None
+        if mm == 1 and md:
+            # Extract dat_url from MD JSON string (set by HA integration)
+            try:
+                md_cfg = json.loads(md)
+                meter_url = md_cfg.get("direct", {}).get("dat_url")
+            except (json.JSONDecodeError, AttributeError):
+                # MD might be a plain URL string in some configs
+                if md.startswith("http"):
+                    meter_url = md
+
+        if meter_url and (now - last_meter_poll >= METER_POLL_S):
+            last_total_power = _poll_meter_url(meter_url)
+            last_meter_poll = now
+            if last_total_power is not None:
+                log.debug("📡 Meter poll → total_power=%.1fW", last_total_power)
 
         with state_lock:
             soc = state["SC"]
@@ -242,10 +293,69 @@ def simulate_dynamics():
             gs = state.get("GS", 0)
             pv = state.get("PV", 0)
 
-            # Determine actual charge/discharge behaviour
-            if gs < 0:
-                # HA commanded grid import (charge battery)
-                charge_power = min(abs(gs), 2400)
+            if meter_url and last_total_power is not None:
+                # ---- Self-consumption mode (MM=1): regulate to zero grid flow ----
+                # total_power > 0 → surplus being exported → charge battery
+                # total_power < 0 → grid import → discharge battery
+                target_power = last_total_power
+                battery_power = max(-MAX_POWER_W, min(MAX_POWER_W, target_power))
+
+                if battery_power > 0:
+                    # Charge battery with surplus PV
+                    if soc < sa:
+                        new_soc = min(sa, soc + (battery_power / 800) * SOC_STEP)
+                        state["SC"] = round(new_soc, 2)
+                        state["SC0"] = state["SC"]
+                        state["PB"] = round(battery_power)
+                        state["GP"] = round(target_power - battery_power)
+                        state["IW"] = pv + round(battery_power)
+                        state["OP"] = 0
+                        state["GD1"] = round(
+                            state.get("GD1", 0) + (battery_power * TICK_S / 3600), 1
+                        )
+                        log.debug("🔋 [MM] Charging %.0fW (surplus=%.0fW), SOC=%.1f%%",
+                                  battery_power, target_power, state["SC"])
+                    else:
+                        # Battery full — surplus goes to grid
+                        state["PB"] = 0
+                        state["GP"] = round(target_power)
+                        state["IW"] = pv
+                        state["OP"] = 0
+                        log.debug("✅ [MM] Battery full, surplus %.0fW to grid", target_power)
+
+                elif battery_power < 0:
+                    # Discharge battery to cover grid import
+                    discharge = abs(battery_power)
+                    if soc > si:
+                        new_soc = max(si, soc - (discharge / 800) * SOC_STEP)
+                        state["SC"] = round(new_soc, 2)
+                        state["SC0"] = state["SC"]
+                        state["PB"] = -round(discharge)
+                        state["GP"] = round(target_power + discharge)
+                        state["IW"] = pv
+                        state["OP"] = round(discharge)
+                        state["GD2"] = round(
+                            state.get("GD2", 0) + (discharge * TICK_S / 3600), 1
+                        )
+                        log.debug("⚡ [MM] Discharging %.0fW (import=%.0fW), SOC=%.1f%%",
+                                  discharge, abs(target_power), state["SC"])
+                    else:
+                        # Battery empty — grid covers the rest
+                        state["PB"] = 0
+                        state["GP"] = round(target_power)
+                        state["IW"] = pv
+                        state["OP"] = 0
+                        log.debug("🪫 [MM] Battery empty, grid covers %.0fW", abs(target_power))
+                else:
+                    # Balanced — no action needed
+                    state["PB"] = 0
+                    state["GP"] = 0
+                    state["IW"] = pv
+                    state["OP"] = 0
+
+            elif gs < 0:
+                # ---- Manual mode: HA commanded grid import (charge battery) ----
+                charge_power = min(abs(gs), MAX_POWER_W)
                 if soc < sa:
                     new_soc = min(sa, soc + (charge_power / 800) * SOC_STEP)
                     state["SC"] = round(new_soc, 2)
@@ -254,22 +364,20 @@ def simulate_dynamics():
                     state["GP"] = -charge_power
                     state["IW"] = charge_power + pv
                     state["OP"] = 0
-                    # Accumulate grid charge energy (Wh)
                     state["GD1"] = round(
                         state.get("GD1", 0) + (charge_power * TICK_S / 3600), 1
                     )
                     log.debug("🔋 Charging at %dW (GS=%d), SOC=%.1f%%",
                               charge_power, gs, state["SC"])
                 else:
-                    # SA reached, stop charging
                     state["PB"] = 0
                     state["GP"] = 0
                     state["IW"] = pv
                     state["OP"] = 0
 
             elif gs > 0:
-                # HA commanded grid export (discharge battery)
-                discharge_power = min(gs, 2400)
+                # ---- Manual mode: HA commanded grid export (discharge battery) ----
+                discharge_power = min(gs, MAX_POWER_W)
                 if soc > si:
                     new_soc = max(si, soc - (discharge_power / 800) * SOC_STEP)
                     state["SC"] = round(new_soc, 2)
@@ -278,21 +386,19 @@ def simulate_dynamics():
                     state["GP"] = discharge_power + pv
                     state["IW"] = pv
                     state["OP"] = discharge_power
-                    # Accumulate grid feed-in energy (Wh)
                     state["GD2"] = round(
                         state.get("GD2", 0) + (discharge_power * TICK_S / 3600), 1
                     )
                     log.debug("⚡ Discharging at %dW (GS=%d), SOC=%.1f%%",
                               discharge_power, gs, state["SC"])
                 else:
-                    # SI reached, stop discharging
                     state["PB"] = 0
                     state["GP"] = pv
                     state["IW"] = pv
                     state["OP"] = pv
 
             else:
-                # GS=0 — device decides: charge from grid if SOC < SA
+                # ---- GS=0: device auto — charge from grid if SOC < SA ----
                 if soc < sa:
                     new_soc = min(sa, soc + SOC_STEP)
                     state["SC"] = round(new_soc, 2)
@@ -307,13 +413,11 @@ def simulate_dynamics():
                     log.debug("🔋 Auto-charging at %dW (GS=0), SOC=%.1f%%",
                               CHARGE_POWER_W, state["SC"])
                 else:
-                    # Fully charged, standby
                     state["PB"] = 0
                     state["GP"] = pv
                     state["IW"] = pv
                     state["OP"] = pv
-                    if soc >= sa:
-                        log.debug("✅ Battery full (SOC=%.1f%%), standby", soc)
+                    log.debug("✅ Battery full (SOC=%.1f%%), standby", soc)
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +488,10 @@ def main():
     log.info("  GET  http://%s:%d/sim/state", lan_ip, args.port)
     log.info("  GET  http://%s:%d/sim/writes", lan_ip, args.port)
     log.info("  POST http://%s:%d/sim/set", lan_ip, args.port)
+    log.info("=" * 60)
+    log.info("Self-consumption mode (MM=1):")
+    log.info("  HA integration sets MD → simulator polls HA proxy URL")
+    log.info("  Regulates like real device — no manual GS writes needed")
     log.info("=" * 60)
 
     zeroconf = None
