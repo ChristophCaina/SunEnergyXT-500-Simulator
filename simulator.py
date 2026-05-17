@@ -875,6 +875,7 @@ def simulate_dynamics():
             si = state.get("SI", 10)
             gs = state.get("GS", 0)
             pv = state.get("PV", 0)
+            MAX_POWER_W = state.get("IS", 2400)
             capacity_wh = sim_battery_config.get("capacity_wh", 5000)
             soc_step = (800 * TICK_S / 3600) / capacity_wh * 100
 
