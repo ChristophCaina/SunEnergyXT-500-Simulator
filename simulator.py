@@ -469,6 +469,10 @@ SIM_UI_HTML = """<!DOCTYPE html>
           <div class="soc-bar-wrap"><div class="soc-bar" id="soc-bar" style="width:0%"></div></div>
         </div>
         <div class="metric">
+          <div class="metric-val" id="m-meter">— W</div>
+          <div class="metric-label">Zähler (HA)</div>
+        </div>
+        <div class="metric">
           <div class="metric-val" id="m-iw">— W</div>
           <div class="metric-label">Eingang</div>
         </div>
@@ -661,6 +665,13 @@ async function updateMetrics() {
     setMetric('m-sc', s.SC, '%');
     setMetric('m-iw', s.IW, 'W');
     document.getElementById('m-mm').textContent = s.MM === 1 ? 'AUTO' : s.GS !== 0 ? 'GS' : 'STANDBY';
+
+    // Meter value from sim/state
+    const sr = await fetch('/sim/state');
+    const ss = await sr.json();
+    if (ss._meter_power !== undefined) {
+      setMetric('m-meter', ss._meter_power, 'W');
+    }
     document.getElementById('soc-bar').style.width = Math.min(100, s.SC) + '%';
 
     // Update PV power display
@@ -854,6 +865,8 @@ def simulate_dynamics():
             last_total_power = _poll_meter_url(meter_url)
             last_meter_poll = now
             if last_total_power is not None:
+                with state_lock:
+                    state["_meter_power"] = round(last_total_power)
                 log.debug("📡 Meter poll → total_power=%.1fW", last_total_power)
 
         with state_lock:
