@@ -471,6 +471,7 @@ def main():
     with state_lock:
         state["SN"] = args.sn
         state["IP"] = lan_ip
+        state["COM"] = args.port
 
     log.info("=" * 60)
     log.info("SunEnergyXT 500 PRO Simulator")
