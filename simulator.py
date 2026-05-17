@@ -425,6 +425,14 @@ SIM_UI_HTML = """<!DOCTYPE html>
   }
   .model-btn.active { background: var(--accent); color: #000; font-weight: 700; }
   .model-btn:not(.active):hover { color: var(--text); }
+  .kopf-btn {
+    width: 48px; height: 48px; border-radius: 3px;
+    border: 1px solid var(--border); background: var(--bg);
+    color: var(--muted); font-family: var(--mono); font-size: 18px;
+    cursor: pointer; transition: 0.15s;
+  }
+  .kopf-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(240,165,0,0.1); }
+  .kopf-btn:not(.active):hover { border-color: var(--text); color: var(--text); }
 </style>
 </head>
 <body>
@@ -498,20 +506,34 @@ SIM_UI_HTML = """<!DOCTYPE html>
     <div class="card-header">🔋 Batterie-Topologie</div>
     <div class="card-body">
       <div class="bat-grid">
-        <div class="bat-row">
-          <label>Batteriepacks</label>
-          <input type="number" id="bat-packs" min="1" max="6" value="1">
-          <span style="font-size:11px;color:var(--muted)">× Kopfspeicher</span>
+        <div class="bat-row" style="flex-direction:column;align-items:flex-start;gap:8px;">
+          <label style="min-width:unset;">Kopfspeicher <span style="color:var(--muted);font-size:10px;">MAX. 3 · je 2,4 kW · 5 kWh</span></label>
+          <div style="display:flex;gap:8px;">
+            <button class="kopf-btn active" id="kopf-1" onclick="setKopf(1)">1</button>
+            <button class="kopf-btn" id="kopf-2" onclick="setKopf(2)">2</button>
+            <button class="kopf-btn" id="kopf-3" onclick="setKopf(3)">3</button>
+          </div>
         </div>
-        <div class="bat-row">
-          <label>Kapazität pro Pack</label>
-          <input type="number" id="bat-cap" min="500" max="20000" step="100" value="5000">
-          <span style="font-size:11px;color:var(--muted)">Wh</span>
+        <div class="bat-row" style="flex-direction:column;align-items:flex-start;gap:8px;">
+          <label style="min-width:unset;">Erweiterungsspeicher <span style="color:var(--muted);font-size:10px;">MAX. 15 · je 5 kWh</span></label>
+          <div style="display:flex;align-items:center;gap:10px;width:100%;">
+            <input type="range" id="erw-slider" min="0" max="15" step="1" value="0" oninput="setErw(this.value)" style="flex:1;">
+            <span class="slider-val" id="erw-val">0 Stk.</span>
+          </div>
         </div>
-        <div class="bat-row">
-          <label>Max. Ladeleistung</label>
-          <input type="number" id="bat-maxw" min="100" max="2400" step="100" value="800">
-          <span style="font-size:11px;color:var(--muted)">W / Pack</span>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:12px;font-family:var(--mono);font-size:12px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+            <span style="color:var(--muted);">Gesamtkapazität</span>
+            <span style="color:var(--accent2);" id="bat-total-cap">5 kWh</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+            <span style="color:var(--muted);">Gesamtleistung</span>
+            <span style="color:var(--accent2);" id="bat-total-pwr">2,4 kW</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;">
+            <span style="color:var(--muted);">Batteriepacks (BN)</span>
+            <span style="color:var(--accent);" id="bat-total-packs">1</span>
+          </div>
         </div>
         <div class="bat-row">
           <label>SOC manuell setzen</label>
@@ -587,10 +609,37 @@ function setPVMax(i, val) {
   document.getElementById(`pvmax-${i}`).textContent = val + ' W';
 }
 
+// --- Battery Topology ---
+let kopfCount = 1;
+let erwCount = 0;
+
+function setKopf(n) {
+  kopfCount = n;
+  [1,2,3].forEach(i => {
+    document.getElementById(`kopf-${i}`).classList.toggle('active', i === n);
+  });
+  updateBatSummary();
+}
+
+function setErw(n) {
+  erwCount = parseInt(n);
+  document.getElementById('erw-val').textContent = erwCount + ' Stk.';
+  updateBatSummary();
+}
+
+function updateBatSummary() {
+  const totalPacks = kopfCount + erwCount;
+  const totalCap = totalPacks * 5;
+  const totalPwr = kopfCount * 2.4;
+  document.getElementById('bat-total-cap').textContent = totalCap + ' kWh';
+  document.getElementById('bat-total-pwr').textContent = totalPwr.toFixed(1).replace('.', ',') + ' kW';
+  document.getElementById('bat-total-packs').textContent = totalPacks;
+}
+
 async function applyAll() {
-  const packs = parseInt(document.getElementById('bat-packs').value);
-  const cap = parseInt(document.getElementById('bat-cap').value);
-  const maxw = parseInt(document.getElementById('bat-maxw').value);
+  const totalPacks = kopfCount + erwCount;
+  const totalCapWh = totalPacks * 5000;
+  const maxChargeW = kopfCount * 2400;
   const soc = parseFloat(document.getElementById('bat-soc').value);
 
   await fetch('/sim/config', {
@@ -598,13 +647,13 @@ async function applyAll() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       pv: pvConfig,
-      battery: {packs, capacity_wh: cap * packs, max_charge_w: maxw}
+      battery: {packs: totalPacks, capacity_wh: totalCapWh, max_charge_w: maxChargeW}
     })
   });
   await fetch('/sim/set', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({SC: soc, SC0: soc, IS: maxw * packs})
+    body: JSON.stringify({SC: soc, SC0: soc, IS: maxChargeW, BN: totalPacks, ON: totalPacks})
   });
   showToast();
 }
@@ -701,10 +750,17 @@ fetch('/sim/config').then(r => r.json()).then(d => {
     buildPVGrid();
   }
   if (d.battery) {
-    document.getElementById('bat-packs').value = d.battery.packs || 1;
-    document.getElementById('bat-cap').value = (d.battery.capacity_wh || 5000) / (d.battery.packs || 1);
-    document.getElementById('bat-maxw').value = d.battery.max_charge_w || 800;
+    // Restore kopf/erw from saved battery config
+    // We store kopfCount separately; derive from max_charge_w
+    const savedMaxW = d.battery.max_charge_w || 2400;
+    kopfCount = Math.round(savedMaxW / 2400) || 1;
+    const totalPacks = d.battery.packs || 1;
+    erwCount = Math.max(0, totalPacks - kopfCount);
+    setKopf(kopfCount);
+    document.getElementById('erw-slider').value = erwCount;
+    setErw(erwCount);
   }
+  updateBatSummary();
 });
 
 // --- Model Switch ---
@@ -732,15 +788,15 @@ async function setModel(pk) {
   document.getElementById('bat-maxw').value = cfg.maxChargeW;
 
   // Apply both PV and battery config + PK/IS in one go
-  const packs = parseInt(document.getElementById('bat-packs').value);
-  const cap = parseInt(document.getElementById('bat-cap').value);
+  const totalPacks = kopfCount + erwCount;
+  const totalCapWh = totalPacks * 5000;
 
   await fetch('/sim/config', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       pv: pvConfig,
-      battery: {packs, capacity_wh: cap * packs, max_charge_w: cfg.maxChargeW}
+      battery: {packs: totalPacks, capacity_wh: totalCapWh, max_charge_w: cfg.maxChargeW}
     })
   });
 
