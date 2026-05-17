@@ -436,10 +436,10 @@ def get_local_ip() -> str:
 
 def start_mdns(sn: str, ip: str, port: int) -> Zeroconf:
     zeroconf = Zeroconf()
-    hostname = f"sunlit-{sn}.local."
+    hostname = f"SunEnergyXT_AIO_{sn}.local."
     info = ServiceInfo(
         type_="_http._tcp.local.",
-        name=f"SunEnergyXT-{sn}._http._tcp.local.",
+        name=f"SunEnergyXT_AIO_{sn}._http._tcp.local.",
         addresses=[socket.inet_aton(ip)],
         port=port,
         properties={
