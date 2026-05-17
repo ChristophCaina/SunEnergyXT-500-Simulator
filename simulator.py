@@ -587,17 +587,7 @@ function setPVMax(i, val) {
   document.getElementById(`pvmax-${i}`).textContent = val + ' W';
 }
 
-async function applyPV() {
-  await fetch('/sim/config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({pv: pvConfig})
-  });
-  showToast();
-}
-
-// --- Battery ---
-async function applyBattery() {
+async function applyAll() {
   const packs = parseInt(document.getElementById('bat-packs').value);
   const cap = parseInt(document.getElementById('bat-cap').value);
   const maxw = parseInt(document.getElementById('bat-maxw').value);
@@ -606,16 +596,21 @@ async function applyBattery() {
   await fetch('/sim/config', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({battery: {packs, capacity_wh: cap * packs, max_charge_w: maxw}})
+    body: JSON.stringify({
+      pv: pvConfig,
+      battery: {packs, capacity_wh: cap * packs, max_charge_w: maxw}
+    })
   });
-  // Set SOC directly
   await fetch('/sim/set', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({SC: soc, SC0: soc})
+    body: JSON.stringify({SC: soc, SC0: soc, IS: maxw * packs})
   });
   showToast();
 }
+
+async function applyPV() { await applyAll(); }
+async function applyBattery() { await applyAll(); }
 
 // --- Scenarios ---
 async function scenario(name) {
@@ -733,10 +728,22 @@ async function setModel(pk) {
   });
   buildPVGrid();
 
-  // Update battery max charge
+  // Update battery max charge in UI
   document.getElementById('bat-maxw').value = cfg.maxChargeW;
 
-  // Write PK and IS to device state
+  // Apply both PV and battery config + PK/IS in one go
+  const packs = parseInt(document.getElementById('bat-packs').value);
+  const cap = parseInt(document.getElementById('bat-cap').value);
+
+  await fetch('/sim/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      pv: pvConfig,
+      battery: {packs, capacity_wh: cap * packs, max_charge_w: cfg.maxChargeW}
+    })
+  });
+
   await fetch('/sim/set', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
