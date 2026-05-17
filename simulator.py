@@ -880,7 +880,7 @@ def simulate_dynamics():
                         state["SC"] = round(new_soc, 2)
                         state["SC0"] = state["SC"]
                         state["PB"] = round(battery_power)
-                        state["GP"] = round(target_power - battery_power)
+                        state["GP"] = round(target_power - (battery_power - pv))
                         state["IW"] = pv + round(battery_power)
                         state["OP"] = 0
                         state["GD1"] = round(
@@ -904,7 +904,7 @@ def simulate_dynamics():
                         state["SC"] = round(new_soc, 2)
                         state["SC0"] = state["SC"]
                         state["PB"] = -round(discharge)
-                        state["GP"] = round(target_power + discharge)
+                        state["GP"] = round(target_power + discharge + pv)
                         state["IW"] = pv
                         state["OP"] = round(discharge)
                         state["GD2"] = round(
