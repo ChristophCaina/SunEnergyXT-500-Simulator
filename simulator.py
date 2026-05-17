@@ -131,6 +131,54 @@ state_lock = threading.Lock()
 write_log: list[dict] = []
 
 # ---------------------------------------------------------------------------
+# Simulator configuration — PV strings and battery topology
+# ---------------------------------------------------------------------------
+sim_pv_config = [
+    {"active": False, "max_w": 625, "label": "PV1"},
+    {"active": False, "max_w": 625, "label": "PV2"},
+    {"active": False, "max_w": 625, "label": "PV3"},
+    {"active": False, "max_w": 625, "label": "PV4"},
+]
+sim_battery_config = {
+    "packs": 1,           # number of battery packs (BN)
+    "capacity_wh": 5000,  # total usable capacity in Wh
+    "max_charge_w": 800,  # max charge power per pack
+}
+
+
+def _apply_pv_state():
+    """Recalculate PV state from sim_pv_config."""
+    with state_lock:
+        total_pv = 0
+        for i, cfg in enumerate(sim_pv_config, 1):
+            if cfg["active"]:
+                # Simulate current MPPT output based on time of day (sinus curve)
+                import math
+                hour = datetime.now(UTC).hour + datetime.now(UTC).minute / 60
+                # Peak at solar noon (12:00), zero before 6:00 and after 20:00
+                angle = math.pi * (hour - 6) / 14
+                factor = max(0.0, math.sin(angle))
+                pwr = round(cfg["max_w"] * factor)
+            else:
+                pwr = 0
+            state[f"PV{i}"] = pwr
+            # Simulate voltage/current when active
+            state[f"VP{i}"] = round(45.0 * (pwr / max(cfg["max_w"], 1)), 1) if pwr > 0 else 0.0
+            state[f"II{i}"] = round(pwr / 45.0, 1) if pwr > 0 else 0.0
+            total_pv += pwr
+        state["PV"] = total_pv
+
+
+def _apply_battery_state():
+    """Apply battery topology config to state."""
+    with state_lock:
+        packs = sim_battery_config["packs"]
+        state["BN"] = packs
+        state["ON"] = packs
+        state["IS"] = sim_battery_config["max_charge_w"] * packs
+
+
+# ---------------------------------------------------------------------------
 # Flask app
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
@@ -196,6 +244,467 @@ def sim_writes():
     return jsonify(write_log)
 
 
+@app.route("/sim/ui")
+def sim_ui():
+    """Simulator Web UI — device configuration panel."""
+    return SIM_UI_HTML
+
+
+SIM_UI_HTML = """<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SunEnergyXT Simulator</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0e14;
+    --surface: #111822;
+    --border: #1e2d3d;
+    --accent: #f0a500;
+    --accent2: #00c2ff;
+    --green: #00e676;
+    --red: #ff3d57;
+    --text: #cdd9e5;
+    --muted: #4a5568;
+    --mono: 'Share Tech Mono', monospace;
+    --sans: 'Barlow', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; }
+
+  .header {
+    border-bottom: 1px solid var(--border);
+    padding: 16px 32px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--surface);
+  }
+  .header-logo {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+  .header-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .header-status {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  .main { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 24px 32px; max-width: 1200px; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .card-header {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .card-body { padding: 20px; }
+
+  /* Live metrics */
+  .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .metric { text-align: center; padding: 12px 8px; border: 1px solid var(--border); border-radius: 3px; }
+  .metric-val { font-family: var(--mono); font-size: 22px; color: var(--accent2); }
+  .metric-val.positive { color: var(--green); }
+  .metric-val.negative { color: var(--red); }
+  .metric-label { font-size: 10px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; margin-top: 4px; }
+
+  /* PV Strings */
+  .pv-grid { display: grid; gap: 14px; }
+  .pv-row {
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 14px 16px;
+    transition: border-color 0.2s;
+  }
+  .pv-row.active { border-color: var(--accent); }
+  .pv-row-top { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .pv-label { font-family: var(--mono); font-size: 13px; color: var(--accent); min-width: 36px; }
+  .pv-power { font-family: var(--mono); font-size: 12px; color: var(--accent2); margin-left: auto; min-width: 60px; text-align: right; }
+
+  .toggle {
+    position: relative; width: 40px; height: 22px; cursor: pointer;
+  }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle-track {
+    position: absolute; inset: 0; background: var(--border); border-radius: 11px; transition: 0.2s;
+  }
+  .toggle input:checked + .toggle-track { background: var(--accent); }
+  .toggle-thumb {
+    position: absolute; left: 3px; top: 3px; width: 16px; height: 16px;
+    background: white; border-radius: 50%; transition: 0.2s;
+  }
+  .toggle input:checked ~ .toggle-thumb { left: 21px; }
+
+  .slider-row { display: flex; align-items: center; gap: 10px; }
+  .slider-row label { font-size: 11px; color: var(--muted); min-width: 80px; }
+  input[type=range] {
+    flex: 1; -webkit-appearance: none; height: 3px; background: var(--border); border-radius: 2px; outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: pointer;
+  }
+  .slider-val { font-family: var(--mono); font-size: 11px; color: var(--text); min-width: 50px; text-align: right; }
+
+  /* Battery config */
+  .bat-grid { display: grid; gap: 16px; }
+  .bat-row { display: flex; align-items: center; gap: 12px; }
+  .bat-row label { font-size: 12px; color: var(--muted); min-width: 140px; }
+  .bat-row input[type=number] {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    font-family: var(--mono); font-size: 13px; padding: 6px 10px; border-radius: 3px; width: 100px;
+  }
+  .bat-row input[type=number]:focus { outline: none; border-color: var(--accent); }
+
+  /* Scenarios */
+  .scenario-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .btn {
+    background: transparent; border: 1px solid var(--border); color: var(--text);
+    font-family: var(--mono); font-size: 11px; letter-spacing: 1px;
+    padding: 10px 14px; border-radius: 3px; cursor: pointer; transition: 0.15s;
+    text-align: left;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn .btn-icon { font-size: 16px; display: block; margin-bottom: 4px; }
+  .btn-apply {
+    width: 100%; margin-top: 16px; padding: 11px;
+    background: var(--accent); color: #000; border: none;
+    font-family: var(--mono); font-size: 12px; letter-spacing: 2px;
+    border-radius: 3px; cursor: pointer; font-weight: 700; transition: 0.15s;
+  }
+  .btn-apply:hover { background: #ffb700; }
+
+  .toast {
+    position: fixed; bottom: 24px; right: 24px;
+    background: var(--green); color: #000;
+    font-family: var(--mono); font-size: 12px;
+    padding: 10px 18px; border-radius: 3px;
+    opacity: 0; transition: opacity 0.3s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+
+  .full-width { grid-column: 1 / -1; }
+  .soc-bar-wrap { margin-top: 8px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .soc-bar { height: 100%; background: var(--green); border-radius: 3px; transition: width 2s; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <div class="header-logo">SunEnergyXT</div>
+    <div class="header-title">Simulator Control Panel</div>
+  </div>
+  <div class="header-status">
+    <div class="dot"></div>
+    <span id="hdr-sn">—</span>
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- Live Metrics -->
+  <div class="card full-width">
+    <div class="card-header">⚡ Live Status</div>
+    <div class="card-body">
+      <div class="metrics">
+        <div class="metric">
+          <div class="metric-val" id="m-pv">— W</div>
+          <div class="metric-label">PV Gesamt</div>
+        </div>
+        <div class="metric">
+          <div class="metric-val" id="m-pb">— W</div>
+          <div class="metric-label">Batterie</div>
+        </div>
+        <div class="metric">
+          <div class="metric-val" id="m-gp">— W</div>
+          <div class="metric-label">Netz</div>
+        </div>
+        <div class="metric">
+          <div class="metric-val" id="m-sc">— %</div>
+          <div class="metric-label">SOC</div>
+          <div class="soc-bar-wrap"><div class="soc-bar" id="soc-bar" style="width:0%"></div></div>
+        </div>
+        <div class="metric">
+          <div class="metric-val" id="m-iw">— W</div>
+          <div class="metric-label">Eingang</div>
+        </div>
+        <div class="metric">
+          <div class="metric-val" id="m-mm">—</div>
+          <div class="metric-label">Modus</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PV Strings -->
+  <div class="card">
+    <div class="card-header">☀️ PV Strings</div>
+    <div class="card-body">
+      <div class="pv-grid" id="pv-grid"></div>
+      <button class="btn-apply" onclick="applyPV()">ÜBERNEHMEN</button>
+    </div>
+  </div>
+
+  <!-- Battery Topology -->
+  <div class="card">
+    <div class="card-header">🔋 Batterie-Topologie</div>
+    <div class="card-body">
+      <div class="bat-grid">
+        <div class="bat-row">
+          <label>Batteriepacks</label>
+          <input type="number" id="bat-packs" min="1" max="6" value="1">
+          <span style="font-size:11px;color:var(--muted)">× Kopfspeicher</span>
+        </div>
+        <div class="bat-row">
+          <label>Kapazität pro Pack</label>
+          <input type="number" id="bat-cap" min="500" max="20000" step="100" value="5000">
+          <span style="font-size:11px;color:var(--muted)">Wh</span>
+        </div>
+        <div class="bat-row">
+          <label>Max. Ladeleistung</label>
+          <input type="number" id="bat-maxw" min="100" max="2400" step="100" value="800">
+          <span style="font-size:11px;color:var(--muted)">W / Pack</span>
+        </div>
+        <div class="bat-row">
+          <label>SOC manuell setzen</label>
+          <input type="number" id="bat-soc" min="0" max="100" step="1" value="15">
+          <span style="font-size:11px;color:var(--muted)">%</span>
+        </div>
+      </div>
+      <button class="btn-apply" onclick="applyBattery()">ÜBERNEHMEN</button>
+    </div>
+  </div>
+
+  <!-- Scenarios -->
+  <div class="card full-width">
+    <div class="card-header">🎬 Szenarien</div>
+    <div class="card-body">
+      <div class="scenario-grid">
+        <button class="btn" onclick="scenario('morning')"><span class="btn-icon">🌅</span>Morgen (schwache Sonne)</button>
+        <button class="btn" onclick="scenario('noon')"><span class="btn-icon">☀️</span>Solarer Mittag (max. PV)</button>
+        <button class="btn" onclick="scenario('cloudy')"><span class="btn-icon">⛅</span>Bewölkt (30% PV)</button>
+        <button class="btn" onclick="scenario('night')"><span class="btn-icon">🌙</span>Nacht (kein PV)</button>
+        <button class="btn" onclick="scenario('full')"><span class="btn-icon">✅</span>Batterie voll (SOC 95%)</button>
+        <button class="btn" onclick="scenario('empty')"><span class="btn-icon">🪫</span>Batterie leer (SOC 10%)</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast">✓ Übernommen</div>
+
+<script>
+// --- PV Config State ---
+let pvConfig = [
+  {active: false, max_w: 625, label: "PV1"},
+  {active: false, max_w: 625, label: "PV2"},
+  {active: false, max_w: 625, label: "PV3"},
+  {active: false, max_w: 625, label: "PV4"},
+];
+
+function buildPVGrid() {
+  const grid = document.getElementById('pv-grid');
+  grid.innerHTML = '';
+  pvConfig.forEach((pv, i) => {
+    grid.innerHTML += `
+    <div class="pv-row ${pv.active ? 'active' : ''}" id="pvrow-${i}">
+      <div class="pv-row-top">
+        <span class="pv-label">${pv.label}</span>
+        <label class="toggle">
+          <input type="checkbox" ${pv.active ? 'checked' : ''} onchange="togglePV(${i}, this.checked)">
+          <div class="toggle-track"></div>
+          <div class="toggle-thumb"></div>
+        </label>
+        <span class="pv-power" id="pvpwr-${i}">0 W</span>
+      </div>
+      <div class="slider-row">
+        <label>Max. Leistung</label>
+        <input type="range" min="100" max="2500" step="25" value="${pv.max_w}"
+          oninput="setPVMax(${i}, this.value)" ${pv.active ? '' : 'disabled'}>
+        <span class="slider-val" id="pvmax-${i}">${pv.max_w} W</span>
+      </div>
+    </div>`;
+  });
+}
+
+function togglePV(i, val) {
+  pvConfig[i].active = val;
+  document.getElementById(`pvrow-${i}`).classList.toggle('active', val);
+  document.querySelector(`#pvrow-${i} input[type=range]`).disabled = !val;
+}
+
+function setPVMax(i, val) {
+  pvConfig[i].max_w = parseInt(val);
+  document.getElementById(`pvmax-${i}`).textContent = val + ' W';
+}
+
+async function applyPV() {
+  await fetch('/sim/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({pv: pvConfig})
+  });
+  showToast();
+}
+
+// --- Battery ---
+async function applyBattery() {
+  const packs = parseInt(document.getElementById('bat-packs').value);
+  const cap = parseInt(document.getElementById('bat-cap').value);
+  const maxw = parseInt(document.getElementById('bat-maxw').value);
+  const soc = parseFloat(document.getElementById('bat-soc').value);
+
+  await fetch('/sim/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({battery: {packs, capacity_wh: cap * packs, max_charge_w: maxw}})
+  });
+  // Set SOC directly
+  await fetch('/sim/set', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({SC: soc, SC0: soc})
+  });
+  showToast();
+}
+
+// --- Scenarios ---
+async function scenario(name) {
+  const scenarios = {
+    morning: {pv: [{active:true,max_w:625},{active:true,max_w:625},{active:false,max_w:625},{active:false,max_w:625}], pvFactor: 0.25},
+    noon:    {pv: [{active:true,max_w:625},{active:true,max_w:625},{active:true,max_w:625},{active:true,max_w:625}], pvFactor: 1.0},
+    cloudy:  {pv: [{active:true,max_w:625},{active:true,max_w:625},{active:false,max_w:625},{active:false,max_w:625}], pvFactor: 0.3},
+    night:   {pv: [{active:false,max_w:625},{active:false,max_w:625},{active:false,max_w:625},{active:false,max_w:625}], pvFactor: 0},
+    full:    null,
+    empty:   null,
+  };
+  const s = scenarios[name];
+  if (s && s.pv) {
+    pvConfig = s.pv.map((p,i) => ({...p, label: `PV${i+1}`}));
+    buildPVGrid();
+    // Override PV values directly for instant effect
+    let totalPV = 0;
+    const pvSet = {};
+    pvConfig.forEach((p, i) => {
+      const pwr = p.active ? Math.round(p.max_w * s.pvFactor) : 0;
+      pvSet[`PV${i+1}`] = pwr;
+      totalPV += pwr;
+    });
+    pvSet.PV = totalPV;
+    await fetch('/sim/set', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(pvSet)});
+    await applyPV();
+  }
+  if (name === 'full') {
+    await fetch('/sim/set', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({SC:95,SC0:95})});
+  }
+  if (name === 'empty') {
+    await fetch('/sim/set', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({SC:10,SC0:10})});
+  }
+  showToast();
+}
+
+// --- Live metrics ---
+async function updateMetrics() {
+  try {
+    const r = await fetch('/read');
+    const d = await r.json();
+    const s = d.state.reported;
+    document.getElementById('hdr-sn').textContent = s.SN;
+    setMetric('m-pv', s.PV, 'W');
+    setMetric('m-pb', s.PB, 'W');
+    setMetric('m-gp', s.GP, 'W');
+    setMetric('m-sc', s.SC, '%');
+    setMetric('m-iw', s.IW, 'W');
+    document.getElementById('m-mm').textContent = s.MM === 1 ? 'AUTO' : s.GS !== 0 ? 'GS' : 'STANDBY';
+    document.getElementById('soc-bar').style.width = Math.min(100, s.SC) + '%';
+
+    // Update PV power display
+    pvConfig.forEach((p, i) => {
+      const el = document.getElementById(`pvpwr-${i}`);
+      if (el) el.textContent = (s[`PV${i+1}`] || 0) + ' W';
+    });
+  } catch(e) {}
+}
+
+function setMetric(id, val, unit) {
+  const el = document.getElementById(id);
+  el.textContent = val + ' ' + unit;
+  el.className = 'metric-val' + (val > 0 ? ' positive' : val < 0 ? ' negative' : '');
+}
+
+function showToast() {
+  const t = document.getElementById('toast');
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2000);
+}
+
+// Init
+buildPVGrid();
+updateMetrics();
+setInterval(updateMetrics, 3000);
+
+// Load existing config
+fetch('/sim/config').then(r => r.json()).then(d => {
+  if (d.pv) {
+    pvConfig = d.pv;
+    buildPVGrid();
+  }
+  if (d.battery) {
+    document.getElementById('bat-packs').value = d.battery.packs || 1;
+    document.getElementById('bat-cap').value = (d.battery.capacity_wh || 5000) / (d.battery.packs || 1);
+    document.getElementById('bat-maxw').value = d.battery.max_charge_w || 800;
+  }
+});
+</script>
+</body>
+</html>"""
+
+
+@app.route("/sim/config", methods=["GET", "POST"])
+def sim_config():
+    """Simulator config: PV strings and battery topology."""
+    global sim_pv_config, sim_battery_config
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        if "pv" in body:
+            sim_pv_config = body["pv"]
+        if "battery" in body:
+            sim_battery_config = body["battery"]
+        _apply_pv_state()
+        _apply_battery_state()
+        return jsonify({"ok": True})
+    return jsonify({"pv": sim_pv_config, "battery": sim_battery_config})
+
+
 @app.route("/sim/set", methods=["POST"])
 def sim_set():
     """
@@ -253,7 +762,7 @@ def simulate_dynamics():
     """
     CHARGE_POWER_W = 800      # default grid charge power when GS=0
     MAX_POWER_W = 2400        # max inverter power
-    SOC_STEP = 0.05           # SOC % per 5s tick at 800W into ~5kWh battery
+    soc_step = 0.05           # SOC % per 5s tick at 800W into ~5kWh battery
     TICK_S = 5
     METER_POLL_S = 1          # poll meter every 1s (like real device)
 
@@ -263,6 +772,9 @@ def simulate_dynamics():
     while True:
         time.sleep(TICK_S)
         now = time.monotonic()
+
+        # --- Update PV from active string config ---
+        _apply_pv_state()
 
         # --- Meter polling (MM=1 mode) ---
         with state_lock:
@@ -292,6 +804,8 @@ def simulate_dynamics():
             si = state.get("SI", 10)
             gs = state.get("GS", 0)
             pv = state.get("PV", 0)
+            capacity_wh = sim_battery_config.get("capacity_wh", 5000)
+            soc_step = (800 * TICK_S / 3600) / capacity_wh * 100
 
             if meter_url and last_total_power is not None:
                 # ---- Self-consumption mode (MM=1): regulate to zero grid flow ----
@@ -303,7 +817,7 @@ def simulate_dynamics():
                 if battery_power > 0:
                     # Charge battery with surplus PV
                     if soc < sa:
-                        new_soc = min(sa, soc + (battery_power / 800) * SOC_STEP)
+                        new_soc = min(sa, soc + (battery_power / 800) * soc_step)
                         state["SC"] = round(new_soc, 2)
                         state["SC0"] = state["SC"]
                         state["PB"] = round(battery_power)
@@ -327,7 +841,7 @@ def simulate_dynamics():
                     # Discharge battery to cover grid import
                     discharge = abs(battery_power)
                     if soc > si:
-                        new_soc = max(si, soc - (discharge / 800) * SOC_STEP)
+                        new_soc = max(si, soc - (discharge / 800) * soc_step)
                         state["SC"] = round(new_soc, 2)
                         state["SC0"] = state["SC"]
                         state["PB"] = -round(discharge)
@@ -357,7 +871,7 @@ def simulate_dynamics():
                 # ---- Manual mode: HA commanded grid import (charge battery) ----
                 charge_power = min(abs(gs), MAX_POWER_W)
                 if soc < sa:
-                    new_soc = min(sa, soc + (charge_power / 800) * SOC_STEP)
+                    new_soc = min(sa, soc + (charge_power / 800) * soc_step)
                     state["SC"] = round(new_soc, 2)
                     state["SC0"] = state["SC"]
                     state["PB"] = charge_power
@@ -379,7 +893,7 @@ def simulate_dynamics():
                 # ---- Manual mode: HA commanded grid export (discharge battery) ----
                 discharge_power = min(gs, MAX_POWER_W)
                 if soc > si:
-                    new_soc = max(si, soc - (discharge_power / 800) * SOC_STEP)
+                    new_soc = max(si, soc - (discharge_power / 800) * soc_step)
                     state["SC"] = round(new_soc, 2)
                     state["SC0"] = state["SC"]
                     state["PB"] = -discharge_power
@@ -400,7 +914,7 @@ def simulate_dynamics():
             else:
                 # ---- GS=0: device auto — charge from grid if SOC < SA ----
                 if soc < sa:
-                    new_soc = min(sa, soc + SOC_STEP)
+                    new_soc = min(sa, soc + soc_step)
                     state["SC"] = round(new_soc, 2)
                     state["SC0"] = state["SC"]
                     state["PB"] = CHARGE_POWER_W
@@ -455,8 +969,55 @@ def start_mdns(sn: str, ip: str, port: int) -> Zeroconf:
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# State persistence — save/load to JSON so restarts don't reset SOC etc.
 # ---------------------------------------------------------------------------
+PERSIST_FILE = "/opt/sunenergyxt-simulator/sim_state.json"
+PERSIST_KEYS = {"SC", "SC0", "GD1", "GD2", "GS", "IS", "SI", "SA", "SO",
+                "LM", "MM", "MD", "MS", "PD", "LD"}
+PERSIST_INTERVAL_S = 30
+
+
+def load_persisted_state():
+    """Load persisted state from disk, merge into current state."""
+    global sim_pv_config, sim_battery_config
+    try:
+        with open(PERSIST_FILE) as f:
+            data = json.load(f)
+        with state_lock:
+            for k, v in data.get("state", {}).items():
+                if k in PERSIST_KEYS:
+                    state[k] = v
+        if "pv" in data:
+            sim_pv_config = data["pv"]
+        if "battery" in data:
+            sim_battery_config = data["battery"]
+        log.info("💾 State restored from %s (SOC=%.1f%%)", PERSIST_FILE, state.get("SC", 0))
+    except FileNotFoundError:
+        log.info("💾 No persisted state found — starting fresh")
+    except Exception as e:
+        log.warning("💾 Failed to load state: %s", e)
+
+
+def save_persisted_state():
+    """Save relevant state fields to disk."""
+    try:
+        with state_lock:
+            to_save = {k: state[k] for k in PERSIST_KEYS if k in state}
+        data = {"state": to_save, "pv": sim_pv_config, "battery": sim_battery_config}
+        with open(PERSIST_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning("💾 Failed to save state: %s", e)
+
+
+def persist_loop():
+    """Background thread: save state every 30s."""
+    while True:
+        time.sleep(PERSIST_INTERVAL_S)
+        save_persisted_state()
+
+
+
 def main():
     parser = argparse.ArgumentParser(description="SunEnergyXT 500 PRO Simulator")
     parser.add_argument("--ip", default="0.0.0.0")
@@ -472,6 +1033,8 @@ def main():
         state["SN"] = args.sn
         state["IP"] = lan_ip
         state["COM"] = args.port
+
+    load_persisted_state()
 
     log.info("=" * 60)
     log.info("SunEnergyXT 500 PRO Simulator")
@@ -507,9 +1070,15 @@ def main():
         t.start()
         log.info("🔋 Dynamics running — charging from grid, SOC starts at 15%%")
 
+    p = threading.Thread(target=persist_loop, daemon=True)
+    p.start()
+    log.info("💾 State persistence active — saving every %ds to %s", PERSIST_INTERVAL_S, PERSIST_FILE)
+
     try:
         app.run(host=args.ip, port=args.port, debug=False, use_reloader=False)
     finally:
+        save_persisted_state()
+        log.info("💾 State saved on shutdown")
         if zeroconf:
             zeroconf.unregister_all_services()
             zeroconf.close()
