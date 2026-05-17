@@ -413,6 +413,18 @@ SIM_UI_HTML = """<!DOCTYPE html>
   .full-width { grid-column: 1 / -1; }
   .soc-bar-wrap { margin-top: 8px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
   .soc-bar { height: 100%; background: var(--green); border-radius: 3px; transition: width 2s; }
+  .model-switch {
+    display: flex; align-items: center; gap: 0;
+    border: 1px solid var(--border); border-radius: 3px; overflow: hidden;
+    margin-left: 24px;
+  }
+  .model-btn {
+    padding: 6px 14px; font-family: var(--mono); font-size: 11px;
+    letter-spacing: 1px; cursor: pointer; border: none;
+    background: transparent; color: var(--muted); transition: 0.15s;
+  }
+  .model-btn.active { background: var(--accent); color: #000; font-weight: 700; }
+  .model-btn:not(.active):hover { color: var(--text); }
 </style>
 </head>
 <body>
@@ -421,6 +433,10 @@ SIM_UI_HTML = """<!DOCTYPE html>
   <div>
     <div class="header-logo">SunEnergyXT</div>
     <div class="header-title">Simulator Control Panel</div>
+  </div>
+  <div class="model-switch">
+    <button class="model-btn" id="btn-std" onclick="setModel(1)">500</button>
+    <button class="model-btn active" id="btn-pro" onclick="setModel(2)">500 PRO</button>
   </div>
   <div class="header-status">
     <div class="dot"></div>
@@ -683,6 +699,48 @@ fetch('/sim/config').then(r => r.json()).then(d => {
     document.getElementById('bat-cap').value = (d.battery.capacity_wh || 5000) / (d.battery.packs || 1);
     document.getElementById('bat-maxw').value = d.battery.max_charge_w || 800;
   }
+});
+
+// --- Model Switch ---
+const MODEL_CONFIGS = {
+  1: { PK: 1, maxPVW: 800, pvPairs: [[0,1],[2,3]], maxChargeW: 800,  label: '500' },
+  2: { PK: 2, maxPVW: 625, pvPairs: null,           maxChargeW: 2400, label: '500 PRO' },
+};
+let currentModel = 2;
+
+async function setModel(pk) {
+  currentModel = pk;
+  const cfg = MODEL_CONFIGS[pk];
+
+  // Update UI buttons
+  document.getElementById('btn-std').classList.toggle('active', pk === 1);
+  document.getElementById('btn-pro').classList.toggle('active', pk === 2);
+
+  // Update PV max per string
+  pvConfig.forEach((p, i) => {
+    p.max_w = cfg.maxPVW;
+  });
+  buildPVGrid();
+
+  // Update battery max charge
+  document.getElementById('bat-maxw').value = cfg.maxChargeW;
+
+  // Write PK and IS to device state
+  await fetch('/sim/set', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({PK: cfg.PK, IS: cfg.maxChargeW})
+  });
+
+  showToast();
+}
+
+// Init model from current state
+fetch('/read').then(r => r.json()).then(d => {
+  const pk = d.state.reported.PK || 2;
+  currentModel = pk;
+  document.getElementById('btn-std').classList.toggle('active', pk === 1);
+  document.getElementById('btn-pro').classList.toggle('active', pk === 2);
 });
 </script>
 </body>
