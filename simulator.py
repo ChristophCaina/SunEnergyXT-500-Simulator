@@ -870,7 +870,8 @@ def simulate_dynamics():
                 # total_power > 0 → surplus being exported → charge battery
                 # total_power < 0 → grid import → discharge battery
                 target_power = last_total_power
-                battery_power = max(-MAX_POWER_W, min(MAX_POWER_W, target_power))
+                # PV production adds to available charge power
+                battery_power = max(-MAX_POWER_W, min(MAX_POWER_W, target_power + pv))
 
                 if battery_power > 0:
                     # Charge battery with surplus PV
