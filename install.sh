@@ -12,7 +12,7 @@ set -e
 REPO_URL="https://github.com/ChristophCaina/SunEnergyXT-500-Simulator.git"
 INSTALL_DIR="/opt/sunenergyxt-simulator"
 SERVICE_NAME="sunenergyxt-simulator"
-PORT=8500
+PORT=80
 SN="TBsimulator0001"
 EXTRA_ARGS=""
 
