@@ -1071,6 +1071,25 @@ def simulate_dynamics():
 
 
 # ---------------------------------------------------------------------------
+# Midnight reset — clear daily energy counters like the real device
+# ---------------------------------------------------------------------------
+def midnight_reset_loop():
+    """Reset daily energy counters at midnight, like the real device."""
+    last_date = datetime.now(UTC).date()
+    while True:
+        time.sleep(30)
+        today = datetime.now(UTC).date()
+        if today != last_date:
+            with state_lock:
+                state["GD1"] = 0
+                state["GD2"] = 0
+                state["PD"] = 0
+                state["LD"] = 0
+            log.info("🌅 Midnight reset — daily energy counters cleared")
+            last_date = today
+
+
+# ---------------------------------------------------------------------------
 # mDNS / Zeroconf announcement
 # ---------------------------------------------------------------------------
 def get_local_ip() -> str:
@@ -1205,6 +1224,10 @@ def main():
         t = threading.Thread(target=simulate_dynamics, daemon=True)
         t.start()
         log.info("🔋 Dynamics running — charging from grid, SOC starts at 15%%")
+
+    m = threading.Thread(target=midnight_reset_loop, daemon=True)
+    m.start()
+    log.info("🌅 Midnight reset active — daily counters reset at 00:00 UTC")
 
     p = threading.Thread(target=persist_loop, daemon=True)
     p.start()
