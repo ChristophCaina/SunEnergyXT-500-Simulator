@@ -1227,6 +1227,13 @@ def main():
         state["COM"] = args.port
 
     load_persisted_state()
+    _apply_battery_state()  # ensure BN/ON/SCn consistent with sim_battery_config at startup
+
+    # Restore MS based on persisted MM + MD
+    with state_lock:
+        mm = state.get("MM", 0)
+        md = state.get("MD", "")
+        state["MS"] = 1 if (mm == 1 and md) else 0
 
     log.info("=" * 60)
     log.info("SunEnergyXT 500 PRO Simulator")
