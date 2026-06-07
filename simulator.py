@@ -178,6 +178,28 @@ def _apply_battery_state():
         state["ON"] = packs
         state["IS"] = sim_battery_config["max_charge_w"] * packs
 
+        # SC0 is master (head unit), SC1..SC5 are slave/extension packs.
+        # Expose SCn and BSn for each extension pack that is configured;
+        # remove keys for slots that no longer exist (topology change).
+        master_soc = state.get("SC", state.get("SC0", 50))
+        for i in range(1, 6):
+            if i < packs:
+                # Extension pack present — report same SOC as master
+                state[f"SC{i}"] = master_soc
+                state[f"BS{i}"] = "4.0.5"
+            else:
+                # Slot not populated — remove so integration sees absence, not stale value
+                state.pop(f"SC{i}", None)
+                state.pop(f"BS{i}", None)
+
+
+def _sync_extension_soc():
+    """Sync SC1..SCn to match master SOC (SC/SC0) for all configured extension packs."""
+    packs = sim_battery_config["packs"]
+    master_soc = state.get("SC", state.get("SC0", 50))
+    for i in range(1, packs):
+        state[f"SC{i}"] = master_soc
+
 
 # ---------------------------------------------------------------------------
 # Flask app
@@ -228,6 +250,15 @@ def write():
             log.info("✏️   WRITE  %-4s  %s → %s", k, v["old"], v["new"])
     if ignored:
         log.warning("⚠️   IGNORED fields (not writable): %s", list(ignored.keys()))
+
+    # Update MS (meter status) based on MM + MD state:
+    # MS=1 (online) when MM=1 and MD is a non-empty string, else MS=0 (not bound).
+    with state_lock:
+        mm = state.get("MM", 0)
+        md = state.get("MD", "")
+        state["MS"] = 1 if (mm == 1 and md) else 0
+        if "MM" in applied or "MD" in applied:
+            log.info("🔌  METER STATUS  MS=%d  (MM=%d, MD=%s)", state["MS"], mm, repr(md[:40] if md else ""))
 
     return jsonify({"result": "accepted", "applied": list(applied.keys())}), 200
 
@@ -957,6 +988,7 @@ def simulate_dynamics():
                         new_soc = min(sa, soc + (battery_power / 800) * soc_step)
                         state["SC"] = round(new_soc, 2)
                         state["SC0"] = state["SC"]
+                        _sync_extension_soc()
                         state["PB"] = round(battery_power)
                         state["GP"] = round(target_power - (battery_power - pv))
                         state["IW"] = pv + round(battery_power)
@@ -981,6 +1013,7 @@ def simulate_dynamics():
                         new_soc = max(si, soc - (discharge / 800) * soc_step)
                         state["SC"] = round(new_soc, 2)
                         state["SC0"] = state["SC"]
+                        _sync_extension_soc()
                         state["PB"] = -round(discharge)
                         state["GP"] = round(target_power + discharge + pv)
                         state["IW"] = pv
@@ -1011,6 +1044,7 @@ def simulate_dynamics():
                     new_soc = min(sa, soc + (charge_power / 800) * soc_step)
                     state["SC"] = round(new_soc, 2)
                     state["SC0"] = state["SC"]
+                    _sync_extension_soc()
                     state["PB"] = charge_power
                     state["GP"] = -charge_power
                     state["IW"] = charge_power + pv
@@ -1033,6 +1067,7 @@ def simulate_dynamics():
                     new_soc = max(si, soc - (discharge_power / 800) * soc_step)
                     state["SC"] = round(new_soc, 2)
                     state["SC0"] = state["SC"]
+                    _sync_extension_soc()
                     state["PB"] = -discharge_power
                     state["GP"] = discharge_power + pv
                     state["IW"] = pv
@@ -1054,6 +1089,7 @@ def simulate_dynamics():
                     new_soc = min(sa, soc + soc_step)
                     state["SC"] = round(new_soc, 2)
                     state["SC0"] = state["SC"]
+                    _sync_extension_soc()
                     state["PB"] = CHARGE_POWER_W
                     state["GP"] = -(CHARGE_POWER_W - pv)
                     state["IW"] = CHARGE_POWER_W
