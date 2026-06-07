@@ -76,6 +76,7 @@ DEFAULT_STATE: dict = {
     # Battery — freshly installed, low SOC
     "SC": 15,                 # total SOC %
     "SC0": 15,                # head unit SOC
+    "BN": 1,                  # 1 battery pack total
     "ON": 1,                  # 1 battery pack online
 
     # Setpoints (writable)
