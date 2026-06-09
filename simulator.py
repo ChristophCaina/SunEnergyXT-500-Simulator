@@ -241,7 +241,7 @@ def write():
     # Validate IS (max inverter power) — cap at hardware maximum based on pack count
     if "IS" in applied:
         with state_lock:
-            max_inverter_w = sim_battery_config.get("packs", 1) * 2400
+            max_inverter_w = sim_battery_config.get("max_charge_w", 2400)  # head units only
             if state["IS"] > max_inverter_w:
                 log.warning("⚠️  IS=%dW exceeds hardware max %dW — capping", state["IS"], max_inverter_w)
                 state["IS"] = max_inverter_w
@@ -895,10 +895,10 @@ def sim_set():
         for k, v in body.items():
             # Enforce hardware limits on power fields
             if k == "PB":
-                max_w = sim_battery_config.get("packs", 1) * 2400
+                max_w = sim_battery_config.get("max_charge_w", 2400)  # head units only
                 v = max(-max_w, min(max_w, v))
             elif k == "IS":
-                max_w = sim_battery_config.get("packs", 1) * 2400
+                max_w = sim_battery_config.get("max_charge_w", 2400)  # head units only
                 v = min(max_w, v)
             state[k] = v
             log.info("🎛️   SIM SET  %-4s = %s", k, v)
@@ -1195,6 +1195,12 @@ def load_persisted_state():
             for k, v in data.get("state", {}).items():
                 if k in PERSIST_KEYS:
                     state[k] = v
+            # Enforce hardware limits on loaded state
+            max_inverter_w = sim_battery_config.get("max_charge_w", 2400)  # head units only
+            if state.get("IS", 2400) > max_inverter_w:
+                log.warning("💾 Persisted IS=%dW exceeds hardware max %dW — capping",
+                            state["IS"], max_inverter_w)
+                state["IS"] = max_inverter_w
         if "pv" in data:
             sim_pv_config = data["pv"]
         if "battery" in data:
