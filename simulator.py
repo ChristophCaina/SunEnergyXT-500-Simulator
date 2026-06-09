@@ -680,7 +680,9 @@ function updateBatSummary() {
 async function applyAll() {
   const totalPacks = kopfCount + erwCount;
   const totalCapWh = totalPacks * 5000;
-  const maxChargeW = kopfCount * 2400;
+  const currentModel = parseInt(document.getElementById('btn-pro')?.classList.contains('active') ? 2 : 1);
+  const maxWPerHead = currentModel === 1 ? 800 : 2400;  // 500=800W, 500 PRO=2400W
+  const maxChargeW = kopfCount * maxWPerHead;
   const soc = parseFloat(document.getElementById('bat-soc').value);
 
   await fetch('/sim/config', {
@@ -794,7 +796,9 @@ fetch('/sim/config').then(r => r.json()).then(d => {
     // Restore kopf/erw from saved battery config
     // We store kopfCount separately; derive from max_charge_w
     const savedMaxW = d.battery.max_charge_w || 2400;
-    kopfCount = Math.round(savedMaxW / 2400) || 1;
+    const pk = d.state?.reported?.PK || 2;
+    const maxWPerHead = pk === 1 ? 800 : 2400;  // 500=800W, 500 PRO=2400W
+    kopfCount = Math.round(savedMaxW / maxWPerHead) || 1;
     const totalPacks = d.battery.packs || 1;
     erwCount = Math.max(0, totalPacks - kopfCount);
     setKopf(kopfCount);
@@ -1191,20 +1195,20 @@ def load_persisted_state():
     try:
         with open(PERSIST_FILE) as f:
             data = json.load(f)
+        if "pv" in data:
+            sim_pv_config = data["pv"]
+        if "battery" in data:
+            sim_battery_config = data["battery"]
         with state_lock:
             for k, v in data.get("state", {}).items():
                 if k in PERSIST_KEYS:
                     state[k] = v
-            # Enforce hardware limits on loaded state
+            # Enforce hardware limits — battery config must be loaded first
             max_inverter_w = sim_battery_config.get("max_charge_w", 2400)  # head units only
             if state.get("IS", 2400) > max_inverter_w:
                 log.warning("💾 Persisted IS=%dW exceeds hardware max %dW — capping",
                             state["IS"], max_inverter_w)
                 state["IS"] = max_inverter_w
-        if "pv" in data:
-            sim_pv_config = data["pv"]
-        if "battery" in data:
-            sim_battery_config = data["battery"]
         log.info("💾 State restored from %s (SOC=%.1f%%)", PERSIST_FILE, state.get("SC", 0))
     except FileNotFoundError:
         log.info("💾 No persisted state found — starting fresh")
