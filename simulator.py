@@ -176,7 +176,7 @@ def _apply_battery_state():
         packs = sim_battery_config["packs"]
         state["BN"] = packs
         state["ON"] = packs
-        state["IS"] = sim_battery_config["max_charge_w"] * packs
+        state["IS"] = sim_battery_config["max_charge_w"]  # already = kopfCount * maxWPerHead
 
         # SC0 is master (head unit), SC1..SC5 are slave/extension packs.
         # Expose SCn and BSn for each extension pack that is configured;
