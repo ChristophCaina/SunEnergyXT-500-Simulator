@@ -238,6 +238,15 @@ def write():
             else:
                 ignored[key] = value
 
+    # Validate IS (max inverter power) — cap at hardware maximum based on pack count
+    if "IS" in applied:
+        with state_lock:
+            max_inverter_w = sim_battery_config.get("packs", 1) * 2400
+            if state["IS"] > max_inverter_w:
+                log.warning("⚠️  IS=%dW exceeds hardware max %dW — capping", state["IS"], max_inverter_w)
+                state["IS"] = max_inverter_w
+                applied["IS"]["new"] = max_inverter_w
+
     entry = {
         "time": datetime.now(UTC).isoformat(),
         "applied": applied,
@@ -884,6 +893,13 @@ def sim_set():
         return jsonify({"error": "invalid body"}), 400
     with state_lock:
         for k, v in body.items():
+            # Enforce hardware limits on power fields
+            if k == "PB":
+                max_w = sim_battery_config.get("packs", 1) * 2400
+                v = max(-max_w, min(max_w, v))
+            elif k == "IS":
+                max_w = sim_battery_config.get("packs", 1) * 2400
+                v = min(max_w, v)
             state[k] = v
             log.info("🎛️   SIM SET  %-4s = %s", k, v)
     return jsonify({"ok": True, "updated": list(body.keys())})
