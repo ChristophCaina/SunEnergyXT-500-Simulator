@@ -910,20 +910,27 @@ def sim_set():
 
 
 # ---------------------------------------------------------------------------
-# Meter polling — reads total_power from HA proxy URL (like the real device)
+# Meter polling — reads the field configured via MD's dat_str.pwr from the
+# HA proxy URL (like the real device is expected to).
 # ---------------------------------------------------------------------------
-def _poll_meter_url(url: str) -> float | None:
+def _poll_meter_url(url: str, field: str = "total_act_power") -> float | None:
     """
-    Poll the HA proxy endpoint and return total_power in Watts.
-    Returns None on any error.
+    Poll the HA proxy endpoint and return the power value for `field`.
+
+    `field` should be whatever dat_str.pwr in the current MD config points
+    at (e.g. "a_act_power", "b_act_power", "total_act_power" — see the
+    Shelly EM.GetStatus-compatible schema the proxy now returns). Defaults
+    to "total_act_power" for callers that don't pass an explicit field.
+
+    Returns None on any error (unreachable, malformed JSON, missing field).
     Sign convention: positive = export to grid, negative = import from grid.
     """
     try:
         with urllib.request.urlopen(url, timeout=3) as resp:
             data = json.loads(resp.read())
-            return float(data["total_power"])
+            return float(data[field])
     except (urllib.error.URLError, KeyError, ValueError, OSError) as e:
-        log.warning("⚠️  Meter poll failed (%s): %s", url, e)
+        log.warning("⚠️  Meter poll failed (%s, field=%s): %s", url, field, e)
         return None
 
 
@@ -935,10 +942,12 @@ def simulate_dynamics():
     Simulates a SunEnergyXT 500 PRO with two operating modes:
 
     MM=1 + MD set (self-consumption mode):
-        Polls the HA proxy URL configured in MD, reads total_power and
-        uses it as the regulation target — exactly like the real device.
-        Positive total_power = grid export → battery charges to absorb surplus.
-        Negative total_power = grid import → battery discharges to cover demand.
+        Polls the HA proxy URL configured in MD, reads the power field
+        selected by dat_str.pwr (defaults to total_act_power) and uses
+        it as the regulation target — exactly like the real device is
+        expected to.
+        Positive value = grid export → battery charges to absorb surplus.
+        Negative value = grid import → battery discharges to cover demand.
 
     MM=0 or MD empty (manual / GS mode):
         Falls back to GS setpoint behaviour:
@@ -966,23 +975,29 @@ def simulate_dynamics():
             md = state.get("MD", "")
 
         meter_url = None
+        meter_field = "total_act_power"
         if mm == 1 and md:
-            # Extract dat_url from MD JSON string (set by HA integration)
+            # Extract dat_url + dat_str.pwr from MD JSON string (set by HA
+            # integration). pwr selects which field of the proxy's Shelly-
+            # schema response this Kopfspeicher regulates against — e.g.
+            # "a_act_power" for a unit wired to phase L1. Falls back to
+            # "total_act_power" if pwr isn't set (older MD configs).
             try:
                 md_cfg = json.loads(md)
                 meter_url = md_cfg.get("direct", {}).get("dat_url")
+                meter_field = md_cfg.get("dat_str", {}).get("pwr") or "total_act_power"
             except (json.JSONDecodeError, AttributeError):
                 # MD might be a plain URL string in some configs
                 if md.startswith("http"):
                     meter_url = md
 
         if meter_url and (now - last_meter_poll >= METER_POLL_S):
-            last_total_power = _poll_meter_url(meter_url)
+            last_total_power = _poll_meter_url(meter_url, meter_field)
             last_meter_poll = now
             if last_total_power is not None:
                 with state_lock:
                     state["_meter_power"] = round(last_total_power)
-                log.debug("📡 Meter poll → total_power=%.1fW", last_total_power)
+                log.debug("📡 Meter poll → %s=%.1fW", meter_field, last_total_power)
 
         with state_lock:
             soc = state["SC"]
