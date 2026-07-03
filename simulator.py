@@ -71,7 +71,7 @@ DEFAULT_STATE: dict = {
     "OP": 0,                  # no output (not discharging)
     "GP": -800,               # negative = drawing from grid
     "LP": 0,                  # no load port
-    "PB": 800,                # battery charging at 800W
+    "BP": 800,                # battery charging at 800W
 
     # Battery — freshly installed, low SOC
     "SC": 15,                 # total SOC %
@@ -505,7 +505,7 @@ SIM_UI_HTML = """<!DOCTYPE html>
           <div class="metric-label">PV Gesamt</div>
         </div>
         <div class="metric">
-          <div class="metric-val" id="m-pb">— W</div>
+          <div class="metric-val" id="m-bp">— W</div>
           <div class="metric-label">Batterie</div>
         </div>
         <div class="metric">
@@ -747,7 +747,7 @@ async function updateMetrics() {
     const s = d.state.reported;
     document.getElementById('hdr-sn').textContent = s.SN;
     setMetric('m-pv', s.PV, 'W');
-    setMetric('m-pb', s.PB, 'W');
+    setMetric('m-bp', s.BP, 'W');
     setMetric('m-gp', s.GP, 'W');
     setMetric('m-sc', s.SC, '%');
     setMetric('m-iw', s.IW, 'W');
@@ -898,7 +898,7 @@ def sim_set():
     with state_lock:
         for k, v in body.items():
             # Enforce hardware limits on power fields
-            if k == "PB":
+            if k == "BP":
                 max_w = sim_battery_config.get("max_charge_w", 2400)  # head units only
                 v = max(-max_w, min(max_w, v))
             elif k == "IS":
@@ -1009,7 +1009,7 @@ def simulate_dynamics():
                         state["SC"] = round(new_soc, 2)
                         state["SC0"] = state["SC"]
                         _sync_extension_soc()
-                        state["PB"] = round(battery_power)
+                        state["BP"] = round(battery_power)
                         state["GP"] = round(target_power - (battery_power - pv))
                         state["IW"] = pv + round(battery_power)
                         state["OP"] = 0
@@ -1020,7 +1020,7 @@ def simulate_dynamics():
                                   battery_power, target_power, state["SC"])
                     else:
                         # Battery full — surplus goes to grid
-                        state["PB"] = 0
+                        state["BP"] = 0
                         state["GP"] = round(target_power)
                         state["IW"] = pv
                         state["OP"] = 0
@@ -1034,7 +1034,7 @@ def simulate_dynamics():
                         state["SC"] = round(new_soc, 2)
                         state["SC0"] = state["SC"]
                         _sync_extension_soc()
-                        state["PB"] = -round(discharge)
+                        state["BP"] = -round(discharge)
                         state["GP"] = round(target_power + discharge + pv)
                         state["IW"] = pv
                         state["OP"] = round(discharge)
@@ -1045,14 +1045,14 @@ def simulate_dynamics():
                                   discharge, abs(target_power), state["SC"])
                     else:
                         # Battery empty — grid covers the rest
-                        state["PB"] = 0
+                        state["BP"] = 0
                         state["GP"] = round(target_power)
                         state["IW"] = pv
                         state["OP"] = 0
                         log.debug("🪫 [MM] Battery empty, grid covers %.0fW", abs(target_power))
                 else:
                     # Balanced — no action needed
-                    state["PB"] = 0
+                    state["BP"] = 0
                     state["GP"] = 0
                     state["IW"] = pv
                     state["OP"] = 0
@@ -1065,7 +1065,7 @@ def simulate_dynamics():
                     state["SC"] = round(new_soc, 2)
                     state["SC0"] = state["SC"]
                     _sync_extension_soc()
-                    state["PB"] = charge_power
+                    state["BP"] = charge_power
                     state["GP"] = -charge_power
                     state["IW"] = charge_power + pv
                     state["OP"] = 0
@@ -1075,7 +1075,7 @@ def simulate_dynamics():
                     log.debug("🔋 Charging at %dW (GS=%d), SOC=%.1f%%",
                               charge_power, gs, state["SC"])
                 else:
-                    state["PB"] = 0
+                    state["BP"] = 0
                     state["GP"] = 0
                     state["IW"] = pv
                     state["OP"] = 0
@@ -1088,7 +1088,7 @@ def simulate_dynamics():
                     state["SC"] = round(new_soc, 2)
                     state["SC0"] = state["SC"]
                     _sync_extension_soc()
-                    state["PB"] = -discharge_power
+                    state["BP"] = -discharge_power
                     state["GP"] = discharge_power + pv
                     state["IW"] = pv
                     state["OP"] = discharge_power
@@ -1098,7 +1098,7 @@ def simulate_dynamics():
                     log.debug("⚡ Discharging at %dW (GS=%d), SOC=%.1f%%",
                               discharge_power, gs, state["SC"])
                 else:
-                    state["PB"] = 0
+                    state["BP"] = 0
                     state["GP"] = pv
                     state["IW"] = pv
                     state["OP"] = pv
@@ -1110,7 +1110,7 @@ def simulate_dynamics():
                     state["SC"] = round(new_soc, 2)
                     state["SC0"] = state["SC"]
                     _sync_extension_soc()
-                    state["PB"] = CHARGE_POWER_W
+                    state["BP"] = CHARGE_POWER_W
                     state["GP"] = -(CHARGE_POWER_W - pv)
                     state["IW"] = CHARGE_POWER_W
                     state["OP"] = 0
@@ -1120,7 +1120,7 @@ def simulate_dynamics():
                     log.debug("🔋 Auto-charging at %dW (GS=0), SOC=%.1f%%",
                               CHARGE_POWER_W, state["SC"])
                 else:
-                    state["PB"] = 0
+                    state["BP"] = 0
                     state["GP"] = pv
                     state["IW"] = pv
                     state["OP"] = pv
